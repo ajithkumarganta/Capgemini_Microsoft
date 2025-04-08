@@ -1,0 +1,4 @@
+To Extend the disk of C drive if there is a system reserved partition in between the C drive and unallocated space. 
+We need to follow the steps mentioned in the following attached document. 
+ 
+https://learn.microsoft.com/en-us/troubleshoot/azure/virtual-machines/windows/cannot-extend-encrypted-os-volume#extend-the-system-reserved-volume-into-the-unallocated-space 
