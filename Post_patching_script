@@ -1,0 +1,205 @@
+<#
+.SYNOPSIS
+    This script can be used to perform post-patching activities on FDE servers
+.DESCRIPTION
+    This script performs pre-patching activities like starting the services, Stopping the started servers during patching etc.
+    Ensure that this script is run in an Azure VM so that the Services of other VMs are accessible.
+    #>
+
+
+    [CmdletBinding()]
+    param
+    (
+        [Parameter(Mandatory = $true, Position = 1)] [String] $MaintenanceConfigName 
+    )
+    
+    $startTime = Get-Date
+    $CurrentDate = Get-Date -Format yyyyMMdd
+    $ErrorActionPreference = "Stop"
+    $WarningPreference = "SilentlyContinue"
+    $VMListPath = $PSScriptRoot + "\VMList_"+$MaintenanceConfigName+"_$CurrentDate.csv"   
+    $ServiceListPath = $PSScriptRoot + "\RunningServicesList_"+$MaintenanceConfigName+"_$CurrentDate.csv" 
+    $PostPatchingErrorVMListPath = $PSScriptRoot + "\PostPatchingErrorVMList_"+$MaintenanceConfigName+"_$CurrentDate.csv" 
+    $ErrorVMs = @()
+    
+    Function AddRecordToErrorVMs($ServerName, $ResourceGroupName, $SubscriptionName,$Reason) 
+    {
+        $ErrorVM = [pscustomobject]@{
+            'ServerName'        = $ServerName
+            'ResourceGroupname' = $ResourceGroupName
+            'SubscriptionName'  = $SubscriptionName
+            'Reason'            = $Reason
+        }
+        return $ErrorVM
+    }
+    
+    
+    try 
+    {
+        Write-Host ("Connecting to Azure Account") -ForegroundColor Yellow
+        Connect-AzAccount
+    }
+    catch 
+    {
+        Write-Host ("Error while connect to Azure Account") -ForegroundColor Red
+        Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+        exit
+    }
+    
+    $VMs = Import-Csv -Path $VMListPath | Sort-Object -Property SubscriptionName
+    $PreviousRunningServices = Import-Csv -Path $ServiceListPath
+    foreach ($VM in $VMs)
+    {
+        $ServerName = $VM.ServerName
+        $ResourceGroupName = $VM.ResourceGroupName
+        $SubscriptionName = $VM.SubscriptionName
+        $ExpectedState = $VM.Status
+        $ErrorMessage = $null
+    
+        $currentsubcontext = (Get-AzContext).Subscription.Name
+        if ($currentsubcontext -ne $SubscriptionName) 
+        {
+            Write-Host "Setting Context to Subscription: $SubscriptionName" -ForegroundColor Yellow
+            try 
+            {
+                $azcon = Set-AzContext -Subscription $SubscriptionName
+            }
+            catch 
+            {
+                Write-Output "Failed to set context to Subscription - $SubscriptionName"
+                Write-Output "Error: $($_.Exception.Message)"
+                $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName "Failed to set context to Subscription"
+                $ErrorVMs += $ErrorVM
+                continue
+            }
+        }
+    
+        try 
+        {
+            Write-Host "Checking the status of the VM : $ServerName" -ForegroundColor Yellow
+            $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+        }
+        catch 
+        {
+            Write-Host ("Error while checking the status of the VM : $ServerName") -ForegroundColor Red
+            Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+            $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName "Failed to get VM status"
+            $ErrorVMs += $ErrorVM
+            continue
+        }
+    
+        try 
+        {
+            if ($ExpectedState -ne "VM running" -and $VMStatus -eq "VM running")
+            {
+                Write-Host("VM $ServerName is in Running state and it was in Stopped State before Patching. Stopping the VM") -ForegroundColor Yellow
+                Stop-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -NoWait -Force
+                Start-Sleep -Seconds 120
+                $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+                $retryCount = 0
+                $maxRetries = 5
+                while ($VMStatus -ne "VM deallocated" -and $retryCount -lt $maxRetries)
+                {
+                    Write-Host "VM $ServerName is not yet stopped. Will check after 2 minutes again" -ForegroundColor Red
+                    Start-Sleep -Seconds 120
+                    $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status).Statuses[1].DisplayStatus
+                    $retryCount++
+                }
+                if ($VMStatus -ne "VM deallocated")
+                {
+                    Write-Host "Failed to stop VM $ServerName after $maxRetries attempts" -ForegroundColor Red
+                    $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName "Failed to stop VM after multiple attempts"
+                    $ErrorVMs += $ErrorVM
+                }
+                else
+                {
+                    Write-Host "$ServerName has been stopped successfully" -ForegroundColor Green
+                }           
+                continue
+            }
+        }
+        catch 
+        {
+            Write-Host ("Error while stopping the $ServerName") -ForegroundColor Red
+            Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+            $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName "Failed to stop the VM"
+            $ErrorVMs += $ErrorVM
+            continue
+        }
+    
+        if($ExpectedState -ne "VM Running" -and $VMStatus -ne "VM Running")
+        {
+            Write-Host("VM $ServerName is already in Stopped state") -ForegroundColor Green
+            continue
+        }
+        
+        try 
+        {
+            if ($ExpectedState -eq "VM Running" -and $VMStatus -ne "VM running")
+            {
+                Write-Host("VM $ServerName is in Stopped state and it was in Running State before Patching. Starting the VM") -ForegroundColor Yellow
+                Start-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -NoWait
+                Start-Sleep -Seconds 120
+                $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+                while ($VMStatus -ne "VM running")
+                {
+                    Write-Host "VM $ServerName is not yet started. Will check after 2 minutes again" -ForegroundColor Red
+                    Start-Sleep -Seconds 120
+                    $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+                }
+                Write-Host "$ServerName has been started successfully" -ForegroundColor Green
+            }
+        }
+        catch 
+        {
+            Write-Host ("Error while starting the $ServerName") -ForegroundColor Red
+            Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+            $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName "Failed to start the VM"
+            $ErrorVMs += $ErrorVM
+            continue
+        }
+    
+        try 
+        {
+            Write-Host("Fetching the services running on $ServerName") -ForegroundColor Yellow
+            $Services = Get-Service -ComputerName $ServerName  | Where-Object { $_.Status -eq 'Running' } | Select-Object -Property Name, DisplayName        
+        }
+        catch 
+        {
+            Write-Host ("Error while fetching the services running on $ServerName") -ForegroundColor Red
+            Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+            $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName "Failed to get the services running on the VM"
+            $ErrorVMs += $ErrorVM
+            continue
+        }
+    
+        Write-Host("Checking if any services which were running before patching and are in stopped state now in Server : $ServerName. Starting the services") -ForegroundColor Yellow
+        $ServicesToStart = $PreviousRunningServices | Where-Object { $_.ServerName -eq $ServerName } | Where-Object { $_.Name -notin $Services.Name }
+        foreach ($Service in $ServicesToStart) 
+        {
+            try 
+            {
+                Write-Host "Starting service $($service.DisplayName) on $ServerName" -ForegroundColor Yellow
+                Get-Service -ComputerName $ServerName -Name $service.Name | Start-Service
+                Write-Host "Service $($service.DisplayName) started successfully on $ServerName" -ForegroundColor Green
+            }
+            catch 
+            {
+                Write-Host ("Error while starting service $($service.DisplayName) on $ServerName") -ForegroundColor Red
+                Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+                $ErrorMessage = $ErrorMessage + " | " + "Failed to start service $($service.DisplayName)."
+            }
+        }
+        if($null -ne $ErrorMessage)
+        {
+            $ErrorVM = AddRecordToErrorVMs $ServerName $ResourceGroupName $SubscriptionName $ErrorMessage
+            $ErrorVMs += $ErrorVM
+        }
+    }
+    
+    $ErrorVMs | Export-CSV -Path $PostPatchingErrorVMListPath -NoTypeInformation
+    $endTime = Get-Date
+    Write-Host "Script ended at: $endTime"
+    
+    $duration = $endTime - $startTime
+    Write-Host "Script execution time: $($duration.TotalMinutes) minutes"
