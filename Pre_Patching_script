@@ -1,0 +1,339 @@
+<#
+.SYNOPSIS
+    This script can be used to perform pre-patching activities on FDE servers
+.DESCRIPTION
+    This script helps reading the serverlist from metadata table based on patching wave and performs pre-patching activities like Stopping the services, Starting the servers etc.
+    Ensure that this script is run in an Azure VM so that the Services of other VMs are accessible.
+    This script upon running creates CSV files for VMList, RunningServicesList and PrePatchingErrorVMList. These CSV files are needed for Post Patching script. Ensure this script is placed in such a way that the scripts dont get deleted after reboot
+#>
+
+[CmdletBinding()]
+param
+(
+    [Parameter(Mandatory = $true, Position = 1)] [String] $MaintenanceConfigName
+)
+
+$startTime = Get-Date
+$CurrentDate = Get-Date -Format yyyyMMdd
+Write-Host "Script started at: $startTime"
+$ErrorActionPreference = "Stop"
+$WarningPreference = "SilentlyContinue"
+$VMListPath = $PSScriptRoot + "\VMList_"+$MaintenanceConfigName+"_$CurrentDate.csv"   
+$PrePatchingErrorVMListPath = $PSScriptRoot + "\PrePatchingErrorVMList_"+$MaintenanceConfigName+"_$CurrentDate.csv" 
+$RunningServicesList = $PSScriptRoot + "\RunningServicesList_"+$MaintenanceConfigName+"_$CurrentDate.csv" 
+[int]$Threshold = 15 
+$sqlserver = 'plfm-sqlsvr-prd-wu2.database.windows.net,1433' 
+$sqldb = 'platform-data-db' 
+#$sqlQuery = "SELECT ServerName, ResourceGroup, SubscriptionName, MaintenanceConfigName AS VMMaintenanceConfigName FROM [dbo].[PatchingMetadata](NOLOCK) ORDER BY SubscriptionName"  
+$sqlQuery = "DECLARE @MCN VARCHAR(50) = '$MaintenanceConfigName'
+DECLARE @Env VARCHAR(7) = REVERSE(SUBSTRING(REVERSE(@MCN),1,CHARINDEX('_',REVERSE(@MCN))-1))
+SELECT ServerName, ResourceGroup, SubscriptionName, MaintenanceConfigName as VMMaintenanceConfigName, IsILB FROM [PatchingMetadata](NOLOCK) WHERE MaintenanceConfigName = @MCN
+UNION 
+SELECT ServerName, ResourceGroup, SubscriptionName, MaintenanceConfigName, IsILB FROM [PatchingMetadata](NOLOCK) WHERE IsILB = 1 AND MaintenanceConfigName LIKE '%\_' + @Env ESCAPE '\'
+ORDER BY SubscriptionName
+"
+$ErrorVMs = @()
+$VMDetailsToExport = @()
+$Services = @()
+$Services | Export-Csv -Path $RunningServicesList
+
+try 
+{
+    Write-Host ("Connecting to Azure Account") -ForegroundColor Yellow
+    Connect-AzAccount
+}
+catch 
+{
+    Write-Host ("Error while connect to Azure Account") -ForegroundColor Red
+    Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+    exit
+}
+
+try 
+{
+    Write-Host ("Getting the Access Token") -ForegroundColor Yellow
+    $access_token = (Get-AzAccessToken -ResourceUrl https://database.windows.net).Token 
+}
+catch 
+{
+    Write-Host ("Error while getting the Access Token") -ForegroundColor Red
+    Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+    exit
+}
+
+try 
+{
+    Write-Host ("Executing the SQL query to fetch list of Servers") -ForegroundColor Yellow
+    $VMList = Invoke-Sqlcmd -ServerInstance $sqlserver -Database $sqldb -AccessToken $access_token -query $sqlQuery -ConnectionTimeout 0
+}
+catch 
+{
+    Write-Host ("Error while executing the SQL query to fetch list of Servers") -ForegroundColor Red
+    Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+    exit
+}
+
+Function AddRecordToErrorVMs($ServerName, $ResourceGroupName, $SubscriptionName,$Reason) 
+{
+    $ErrorVM = [pscustomobject]@{
+        'ServerName'        = $ServerName
+        'ResourceGroupname' = $ResourceGroupName
+        'SubscriptionName'  = $SubscriptionName
+        'Reason'            = $Reason
+    }
+    return $ErrorVM
+}
+
+
+Function PrePatching 
+{
+    param (
+        $ServerName,
+        $ResourceGroupName,
+        $SubscriptionName
+    )
+
+    $ErrorMessage = $null
+    try 
+    {
+        Write-Host("Fetching the services running on $ServerName and exporting to CSV file") -ForegroundColor Yellow
+        $Services = Get-Service -ComputerName $ServerName | Where-Object { $_.Status -eq 'Running' } | Select-Object -Property @{n = 'ServerName'; e = { $ServerName } }, Name, DisplayName
+        $Services | Export-Csv -Path $RunningServicesList -NoTypeInformation -Append
+    }
+    catch 
+    {
+        Write-Host ("Error while fetching the services running on $ServerName and exporting to CSV file") -ForegroundColor Red
+        Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+        return AddRecordToErrorVMs -ServerName $ServerName -ResourceGroupName $ResourceGroupName -SubscriptionName $SubscriptionName -Reason "Failed to get running services"
+    }
+
+    $SQLServices = $Services | Where-Object { $_.DisplayName -like 'SQL Server (*' }
+    foreach($SQLService in $SQLServices)
+    {
+        $ServiceName = $SQLService.Name
+        $ServiceDisplayName = $SQLService.DisplayName
+        try 
+        {
+            Write-Host ("SQL Server Service $ServiceDisplayName is running on $ServerName. Stopping it") -ForegroundColor Yellow
+            Get-Service -ComputerName $ServerName -Name $ServiceName | Stop-Service -Force
+        }
+        catch 
+        {
+            Write-Host ("Error while stopping SQL Server Service $ServiceDisplayName on $ServerName") -ForegroundColor Red
+            Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+            $ErrorMessage = "Failed to stop SQL Server Service $ServiceDisplayName."
+        }
+    }
+    
+    try 
+    {
+        $ServiceName = 'lmhosts'
+        if ($Services.Name -contains $ServiceName) 
+        {
+            Write-Host ("TCP Service is running on $ServerName. Stopping it") -ForegroundColor Yellow
+            Get-Service -ComputerName $ServerName -Name $ServiceName | Stop-Service -Force
+        }
+        else 
+        {
+            Write-Host ("TCP Service is not running on $ServerName") -ForegroundColor Yellow
+        }
+    }
+    catch 
+    {
+        Write-Host ("Error while stopping TCP Service on $ServerName") -ForegroundColor Red
+        Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+        $ErrorMessage = $ErrorMessage +" | "+ "Failed to stop TCP Service."
+    }
+    
+    try 
+    {
+        Write-Host ("Checking OS diskspace on $ServerName") -ForegroundColor Green
+        $DiskObject = Get-WmiObject Win32_LogicalDisk -ComputerName $ServerName -Filter "DeviceID = 'C:'" | Select-Object  @{n = 'FreeSpaceInGB'; e = { "{0:n2}" -f ($_.FreeSpace / 1gb) } }
+        $Diskspace = $DiskObject.FreeSpaceInGB
+        Write-Host("OS Diskspace on $ServerName in GB: $Diskspace") -ForegroundColor Yellow
+
+        if ($Diskspace -le $Threshold)
+        {
+            Write-Host "OS Diskspace on $ServerName is less than threshold : $Threshold " -ForegroundColor Yellow
+            $ErrorMessage = $ErrorMessage +" | "+ "OS Diskspace on $ServerName is less than threshold"
+        }
+        else 
+        {
+            Write-Host "OS Diskspace on $ServerName is sufficient" -ForegroundColor Green
+        }
+
+    }
+    catch 
+    {
+        Write-Host ("Error while checking diskspace on $Servername") -ForegroundColor Red
+        Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+        $ErrorMessage = $ErrorMessage +" | "+ "Failed to check diskspace."
+    }
+
+    if ($null -ne $ErrorMessage) 
+    {
+        return AddRecordToErrorVMs -ServerName $ServerName -ResourceGroupName $ResourceGroupName -SubscriptionName $SubscriptionName -Reason $ErrorMessage
+    }
+    else 
+    {
+        Write-Host ("Pre-patching activities completed successfully on $ServerName") -ForegroundColor Green
+        return $null
+    }
+} 
+   
+    
+Foreach ($VM in $VMList) 
+{
+
+    $ServerName = $VM.Servername
+    $ResourceGroupname = $VM.ResourceGroup
+    $SubscriptionName = $VM.SubscriptionName
+    $VMMaintenanceConfigName = $VM.VMMaintenanceConfigName
+    $IsILB = $VM.IsILB
+    $LoadbalancerName = $null
+    $VMCount = 0
+
+    $currentsubcontext = (Get-AzContext).Subscription.Name
+    if ($currentsubcontext -ne $SubscriptionName) 
+    {
+        Write-Host "Setting Context to Subscription: $SubscriptionName" -ForegroundColor Yellow
+        try 
+        {
+            $azcon = Set-AzContext -Subscription $SubscriptionName
+        }
+        catch 
+        {
+            Write-Output "Failed to set context to Subscription - $SubscriptionName"
+            Write-Output "Error: $($_.Exception.Message)"
+            $ErrorVM = AddRecordToErrorVMs -ServerName $ServerName -ResourceGroupName $ResourceGroupname -SubscriptionName $SubscriptionName -Reason "Failed to set context to Subscription - $SubscriptionName"
+            $ErrorVMs += $ErrorVM
+            continue
+        }
+    }
+    try 
+    {
+        Write-Host "Checking the status of the VM : $ServerName" -ForegroundColor Yellow
+        $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+    }
+    catch 
+    {
+        Write-Host ("Error while checking the status of the VM : $ServerName") -ForegroundColor Red
+        Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+        $ErrorVM = AddRecordToErrorVMs -ServerName $ServerName -ResourceGroupName $ResourceGroupname -SubscriptionName $SubscriptionName -Reason "Failed to check status of the VM"
+        $ErrorVMs += $ErrorVM
+        continue
+    }
+
+    try 
+    {
+        if($IsILB -eq '1')
+        {
+            Write-Host("Fetching ILB Details of the VM : $ServerName") -ForegroundColor Yellow  
+            $VMDetails = Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName
+            $VMNicResourceId = $VMDetails.NetworkProfile.NetworkInterfaces.Id
+            $NicDetails = Get-AzNetworkInterface -ResourceId $VMNicResourceId
+            if ($null -eq $NicDetails.IpConfigurations.LoadBalancerBackendAddressPools.Id) 
+            {
+                Write-Host("$ServerName is not part of ILB") -ForegroundColor Yellow
+            }
+            else 
+            {
+                $BackEndPoolId = $NicDetails.IpConfigurations.LoadBalancerBackendAddressPools.Id
+                $LoadbalancerName = $BackEndPoolId.Split('/')[8]
+                $LoadBalancerRGName = $BackEndPoolId.Split('/')[4]
+                $LoadBalancer = Get-AzLoadBalancer -ResourceGroupName $LoadBalancerRGName -Name $LoadbalancerName
+                $BackEndPool = $LoadBalancer.BackendAddressPools | Where-Object { $_.Id -eq $BackEndPoolId }
+                $VMCount = $BackEndPool.BackendIPConfigurations.Count
+                Write-Host("ILB Name of the VM : $ServerName : $LoadbalancerName") -ForegroundColor Yellow
+                Write-Host("VM Count in ILB : $ServerName : $VMCount") -ForegroundColor Yellow
+            }
+        }
+        else 
+        {
+            Write-Host("IsILB is set to 0 for the VM : $ServerName. Skipping the CheckILB Part") -ForegroundColor Yellow
+        }
+    }
+    catch 
+    {
+        Write-Host ("Error while fetching ILB Details of the VM : $ServerName") -ForegroundColor Red
+        Write-Host ("An error occured: $($_.Exception.Message)") -ForegroundColor Red
+        $ErrorVM = AddRecordToErrorVMs -ServerName $ServerName -ResourceGroupName $ResourceGroupname -SubscriptionName $SubscriptionName -Reason "Failed to get ILB Details"
+        $ErrorVMs += $ErrorVM
+        continue
+    }
+    
+
+    $VM = [pscustomobject]@{
+        'ServerName'              = $ServerName
+        'ResourceGroupName'       = $ResourceGroupName
+        'SubscriptionName'        = $SubscriptionName
+        'Status'                  = $VMStatus
+        'ILBName'                 = $LoadbalancerName
+        'VMCountInILB'            = $VMCount
+        'VMMaintenanceConfigName' = $VMMaintenanceConfigName
+    }
+    $VMDetailsToExport += $VM
+
+    if ($VMMaintenanceConfigName -eq $MaintenanceConfigName) 
+    {
+        if ($VMStatus -eq "VM running") 
+        {
+            $ErrorVM = PrePatching -ServerName $ServerName -ResourceGroupName $ResourceGroupName -SubscriptionName $SubscriptionName
+            if ($null -ne $ErrorVM) 
+            {
+                $ErrorVMs += $ErrorVM
+            }   
+        }
+        else 
+        {
+            Write-Host "VM $ServerName is not in Running state. Starting the VM" -ForegroundColor Yellow
+            Start-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Nowait
+            Start-Sleep -Seconds 120
+            $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+            while ($VMStatus -ne "VM running")
+            {
+                Write-Host "VM $ServerName is not yet started. Will check after 2 minutes again" -ForegroundColor Red
+                Start-Sleep -Seconds 120
+                $VMStatus = (Get-AzVM -ResourceGroupName $ResourceGroupName -Name $ServerName -Status). Statuses[1].DisplayStatus
+            }
+            Write-Host "VM $ServerName has been started successfully" -ForegroundColor Green
+            $ErrorVM = PrePatching -ServerName $ServerName -ResourceGroupName $ResourceGroupName -SubscriptionName $SubscriptionName
+            if ($null -ne $ErrorVM) 
+            {
+                $ErrorVMs += $ErrorVM
+            } 
+        }
+    }
+    else 
+    {
+        Write-Host "VM $ServerName is not part of MaintenanceConfigName : $MaintenanceConfigName. Skipping Prepatching activity" -ForegroundColor Yellow
+        continue
+    }
+}
+
+Write-Host("Adding RunningVMCount column to the VM Details") -ForegroundColor Yellow
+foreach ($vm in $VMDetailsToExport) 
+{
+    if ($null -ne $vm.ILBName) 
+    {
+        $runningVMCount = ($VMDetailsToExport | Where-Object { $_.ILBName -eq $vm.ILBName -and $_.Status -eq "VM running" }).Count
+        $vm | Add-Member -MemberType NoteProperty -Name RunningVMCount -Value $runningVMCount
+    } 
+    else 
+    {
+        $vm | Add-Member -MemberType NoteProperty -Name RunningVMCount -Value 0
+    }
+}
+
+Write-Host("Exporting the VM Details of the provided MaintenanceConfigName to CSV file") -ForegroundColor Yellow
+$VMDetailsToExport = $VMDetailsToExport | Where-Object {$_.VMMaintenanceConfigName -eq $MaintenanceConfigName} | Select-Object ServerName, ResourceGroupName, SubscriptionName, Status, ILBName, VMCountInILB, RunningVMCount
+
+$VMDetailsToExport | Export-Csv -Path $VMListPath -NoTypeInformation -Force
+$ErrorVMs | Export-Csv -Path $PrePatchingErrorVMListPath -NoTypeInformation -Force
+
+
+$endTime = Get-Date
+Write-Host "Script ended at: $endTime"
+
+$duration = $endTime - $startTime
+Write-Host "Script execution time: $($duration.TotalMinutes) minutes"
