@@ -1,0 +1,116 @@
+# change default error action
+$ErrorActionPreference = "Stop"
+# session id
+$session = ([guid]::NewGuid()).Guid
+# execuction log paths
+$errorPath = "C:\Users\Public\hypnos-error-" + $session + ".csv"
+$summaryPath = "C:\Users\Public\hypnos-receipt-" + $session + ".csv"
+# specify vm file path
+$dataPath = "L:\FDnE Infra\Hypnos\HypnosVMList.txt"
+# list of vm aliases
+$aliases = $dataPath.Split([Environment]::NewLine)
+
+# role to be used with Hypnos
+$roleName = "FDE Virtual Machine Operator"
+
+# application to be added to resource
+$appName = "FDNEHypnosRemote"
+
+# application id to be used during role assignment
+$objectId = (Get-AzADServicePrincipal -SearchString $appName | Select-Object $_.Id).Id
+
+# step 1 - resolve hostnames and create hashset of names for fast lookup
+$hostNameSet = New-Object System.Collections.Generic.HashSet[string]
+
+foreach($a in $aliases) {
+
+    try {
+        # get host information
+        $hostInfo = [system.net.dns]::gethostentry($a)
+
+        # extract hostname
+        $hostName = $hostInfo.HostName
+
+        # trim host name after first . to remove unneeded info
+        # snip off rest of fqdn
+        $hostName = $hostName.Substring(0, $hostName.IndexOf("."))
+
+        # add hostname to set
+        $hostNameSet.Add($hostName.ToUpper())
+    }
+    catch {
+        write-host $_
+        write-host $a
+    }
+    
+}
+
+# step 2 - iterate over subscriptions for vms in the target set and apply changes
+$subscriptions = Get-AzSubscription
+
+# list to store all target vms/their info
+$targetVms = @()
+$errorVms = @()
+$vmCount = $hostNameSet.Count
+
+foreach($sub in $subscriptions) {
+
+    # set context
+    Set-AzContext -SubscriptionId $sub.Id
+
+    # get all vms in subscription
+    $virtualMachines = Get-AzVM
+
+    # iterate over virtual machines in subscription
+    foreach($vm in $virtualMachines) {
+
+        # if the vm is in the set of target vms we extract its info relevant to hypnos
+        # and we add the hypnos controller identity to a management role
+        $normalizedName = $vm.Name.ToUpper()
+        if($hostNameSet.Contains($normalizedName)) {
+
+            write-host "now processing " $normalizedName
+
+            $hypnosVmInfo = @{
+                id = $vm.Id
+                name = $vm.Name
+                resourceGroupName = $vm.ResourceGroupName
+                subscriptionId = $sub.Id
+            }
+            
+            # add the role to the resource
+            try {
+                New-AzRoleAssignment -ObjectId $objectId -ResourceGroupName $vm.ResourceGroupName -ResourceName $vm.Name -ResourceType $vm.Type -RoleDefinitionName $roleName
+            
+                $targetVms += $hypnosVmInfo
+            }
+            catch {
+                $hypnosVmInfo.error = $_
+                $errorVms += $hypnosVmInfo
+            }
+            
+            $vmCount--
+
+        }
+
+        if($vmCount -eq 0) { break }
+
+    }
+
+    if($vmCount -eq 0) { break }
+    
+}
+
+if($targetVms.Count -gt 0) {
+    $targetVms.GetEnumerator() | select-object name, value | export-csv $summaryPath -NoTypeInformation -Append
+
+    write-host "Summary available here: " $summaryPath
+
+}
+
+if($errorVms.Count -gt 0) {
+    $errorVms.GetEnumerator() | select-object name, value | export-csv $errorPath -NoTypeInformation -Append
+
+    write-host "Erros available here: " $errorPath
+
+}
