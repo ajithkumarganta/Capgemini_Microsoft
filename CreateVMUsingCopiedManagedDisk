@@ -1,0 +1,74 @@
+#Provide the subscription Id
+$subscriptionId = '3a4024dc-cb16-461f-90aa-055ca6dcea8d'
+
+#Provide the name of your resource group
+$resourceGroupName ='ABIINCVMEAST04_WUS2RG'
+
+#Location
+$Location ='West US 2'
+
+#storage account
+$StorageAccount = "abiincvmeast04diag"
+
+#Provide the name of the snapshot that will be used to create OS disk
+#$snapshotName = 'AZFINBIAIRP01_OsDisk'
+
+#$snapshotRG ='FY_AIRBudget' 
+
+#Provide the name of the OS disk that will be created using the snapshot
+$osDiskName = 'ABIINCVMEAST04-OSDisk'
+
+#Provide the name of an existing virtual network where virtual machine will be created
+$virtualNetworkName = 'FDEGSMOReporting-DB-WUS2-VNET-12658'
+
+$virtualNetworkRG ='ERNetwork-DB'
+
+#Provide the name of the virtual machine
+$virtualMachineName = 'ABIINCVMEAST04'
+
+#Provide the size of the virtual machine
+#e.g. Standard_DS3
+#Get all the vm sizes in a region using below script:
+#e.g. Get-AzVMSize -Location westus
+$virtualMachineSize = 'Standard_DS13_v2'
+
+#Set the context to the subscription Id where Managed Disk will be created
+Select-AzSubscription -SubscriptionId $SubscriptionId
+
+#$manageddisk = Get-AzDisk -ResourceGroupName $snapshotRG -DiskName $snapshotName
+
+$disk= Get-AzDisk -ResourceGroupName $resourceGroupName -DiskName $osDiskName
+
+#$diskConfig = New-AzDiskConfig -Location $Location -SourceResourceId $manageddisk.Id -CreateOption Copy
+
+#New-AzureRmDiskConfig -SourceResourceId $managedDisk.Id -Location $Location -CreateOption Copy 
+
+##$disk = New-AzDisk -Disk $diskConfig -ResourceGroupName $resourceGroupName -DiskName $osDiskName
+
+#$avsetID = '/subscriptions/6152a54b-3d32-4b03-8ecd-cb2955076b81/resourceGroups/ABIVMEAST46_WUS2RG/providers/Microsoft.Compute/availabilitySets/ABIVMEAST46_WUS2_AG'
+
+#Initialize virtual machine configuration
+$VirtualMachine = New-AzVMConfig -VMName $virtualMachineName -VMSize $virtualMachineSize # -AvailabilitySetId $avsetID
+
+#Use the Managed Disk Resource Id to attach it to the virtual machine. Please change the OS type to linux if OS disk has linux OS
+$VirtualMachine = Set-AzVMOSDisk -VM $VirtualMachine -ManagedDiskId $disk.Id -CreateOption Attach -Windows
+
+#Create a public IP for the VM
+#$publicIp = New-AzPublicIpAddress -Name ($VirtualMachineName.ToLower()+'_ip') -ResourceGroupName $resourceGroupName -Location $disk.Location -AllocationMethod Dynamic
+
+# Set boot diagnostic storage account
+#$VirtualMachine = Set-AzVMBootDiagnostics -Enable -ResourceGroupName $resourceGroupName -VM $VirtualMachine -StorageAccountName $StorageAccount
+
+#Get the virtual network where virtual machine will be hosted
+$vnet = Get-AzVirtualNetwork -Name $virtualNetworkName -ResourceGroupName $virtualNetworkRG
+
+# Create NIC in the first subnet of the virtual network
+$nic = New-AzNetworkInterface -Name ($VirtualMachineName.ToLower()+'_nic') -ResourceGroupName $resourceGroupName -Location $disk.Location -SubnetId $vnet.Subnets[1].Id
+
+$VirtualMachine = Add-AzVMNetworkInterface -VM $VirtualMachine -Id $nic.Id
+
+
+
+#Create the virtual machine with Managed Disk
+New-AzVM -VM $VirtualMachine -ResourceGroupName $resourceGroupName -Location $disk.Location 
+
