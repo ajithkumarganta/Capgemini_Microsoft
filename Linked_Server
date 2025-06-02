@@ -1,0 +1,21 @@
+Add-PSSnapin SqlServerCmdletSnapin100
+
+Add-PSSnapin SqlServerProviderSnapin100
+
+#Here is the PS script (lets call it PScript1.ps1):
+
+$QueryPath=”L:\FDnE Infra\AzLinkedServer\SQL-SBMail\LinkedServerList.sql”
+$OutputFile=”L:\FDnE Infra\AzLinkedServer\SQL-SBMail\LinkedServerList-All.txt”
+
+$ExecuteQuery= Get-Content -path $QueryPath | out-string
+
+“Results — > `r`n`r`n” > $OutputFile
+
+FOREACH($server in GC “L:\FDnE Infra\AzLinkedServer\SQL-SBMail\AllServers.txt”)
+{
+$server 
+“——————————-” >> $OutputFile
+$server >> $OutputFile
+“——————————-” >> $OutputFile
+invoke-sqlcmd -ServerInstance $server -query $ExecuteQuery -querytimeout 60000 | ft -autosize | out-string -width 4096 >> $OutputFile
+}
