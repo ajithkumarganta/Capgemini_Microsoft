@@ -1,0 +1,375 @@
+#Variables
+$cpuCritical 		= "80"
+$memoryCritical 	= "85"
+$signature 			= "FDnE Infra"
+$freeSpaceFileName 	= "$PSScriptRoot\FreeSpace.htm"
+
+<#
+$PSScriptRoot
+#>
+
+#Set SQLServer details
+$DatabaseName = "StarlightUsage"
+$ServerName = "ABIVMWEST65"
+
+#ConnectionString
+$connectionString = "Server=$ServerName;Database=$DatabaseName;Integrated Security=SSPI;
+
+#Create and Open SQLConnection
+$conn=new-object System.Data.SqlClient.SQLConnection
+$conn.ConnectionString=$ConnectionString
+$conn.Open()
+
+#Retrieve Server and Cube Details
+$Query = "SELECT DISTINCT [ServerName], [CNAME] FROM [dbo].[ServersList] WITH (NOLOCK)"
+
+#SQLCommand
+$cmd=new-object system.Data.SqlClient.SqlCommand($Query,$conn)
+
+#DataSet and DataAdapter
+$ds=New-Object system.Data.DataSet
+$da=New-Object system.Data.SqlClient.SqlDataAdapter($cmd)
+
+#Manual override of execution timeout
+$da.SelectCommand.CommandTimeout=90
+
+#Fill the dataset with query resultset
+[void]$da.fill($ds)
+$ServerList = $ds.Tables[0]
+
+# First lets create a text file, where we will later save the freedisk space info 
+New-Item -ItemType file $freeSpaceFileName -Force 
+
+# function to write the HTML Header to the file 
+function writeHtmlHeader 
+{ 
+	param($fileName)
+	
+	$date = ( get-date -Format g)
+	
+	Add-Content $fileName "<!DOCTYPE html>" 
+	Add-Content $fileName "<head>" 
+	Add-Content $fileName "<meta http-equiv='Content-Type' content='text/html; charset=iso-8859-1'>" 
+	Add-Content $fileName '<title>Server Usage Report</title>' 
+	add-content $fileName '<STYLE TYPE="text/css">' 
+	add-content $fileName  "<!--"
+	add-content $fileName  "table {" 
+	add-content $fileName  "border:0.25px solid #0fa650;"
+	add-content $fileName  "border-left:0px;"
+	add-content $fileName  "border-collapse:collapse;"
+	add-content $fileName  "}"
+	add-content $fileName  "td {" 
+	add-content $fileName  "font-family: Segoe UI;" 
+	add-content $fileName  "font-size: 13px;" 
+	add-content $fileName  "border-top: 0px solid #000000;"  
+	add-content $fileName  "border-left: 0px solid #000000;"  
+	add-content $fileName  "padding-left: 5px;"  
+	add-content $fileName  "padding-bottom: 5px;"
+	add-content $fileName  "padding-top: 5px;" 
+	add-content $fileName  "padding-right: 3px;"
+	add-content $fileName  "vertical-align: top;"
+	add-content $fileName  "word-break: break-word;"
+	add-content $fileName  "}" 
+	add-content $fileName  "-->" 
+	add-content $fileName  "</style>" 
+	Add-Content $fileName "</head>" 
+	Add-Content $fileName "<body>" 
+	add-content $fileName  "<table width='95%' style= 'border: 0px solid #FFFFFF'>" 
+	add-content $fileName  "<tr >" 
+	add-content $fileName  "<td colspan='5' height='25' align='center' style= 'border: 0px solid #FFFFFF'>" 
+	add-content $fileName  "<font face='Segoe UI' size='4' colspan='5'><strong>Server usage statistics at - $date</strong></font>" 
+	add-content $fileName  "</td>" 
+	add-content $fileName  "</tr>" 
+	add-content $fileName  "</table>"  
+} 
+
+# function to write the main table Header to the file 
+function writeTableMainHeader 
+{ 
+	param($fileName)
+	
+	Add-Content $freeSpaceFileName "</br></br>"
+	Add-Content $freeSpaceFileName "<table width='95%' cellpadding='0' cellspacing='0'>"  
+	Add-Content $fileName "<tr bgcolor=#0174DF>" 
+	Add-Content $fileName "<td align='center'><font color=#FFFFFF>CName</font></td>" 
+	Add-Content $fileName "<td align='center'><font color=#FFFFFF>Server</font></td>"  
+	Add-Content $fileName "<td align='center'><font color=#FFFFFF>Memory Usage %</font></td>" 
+	Add-Content $fileName "<td align='center'><font color=#FFFFFF>CPU Usage %</font></td>" 
+	Add-Content $fileName "<td align='center'><font color=#FFFFFF>Disk Status</font></td>" 
+	Add-Content $fileName "<td align='center'><font color=#FFFFFF>Services</font></td>" 
+	Add-Content $fileName "</tr>" 
+} 
+
+# function to write the HTML Header to the file 
+function writeTableHeader 
+{ 
+	param($fileName)
+	
+	Add-Content $freeSpaceFileName "<table width='90%' cellpadding='0' cellspacing='0'>" 
+	Add-Content $fileName "<tr bgcolor=#CCCCCC>" 
+	Add-Content $fileName "<td width='2.5%' align='center'>Drive</td>" 
+	Add-Content $fileName "<td width='8%' align='center'>Total Space (GB)</td>" 
+	Add-Content $fileName "<td width='8%' align='center'>Used Space (GB)</td>" 
+	Add-Content $fileName "<td width='8%' align='center'>Free Space (GB)</td>" 
+	Add-Content $fileName "<td width='8%' align='center'>Free Space (%)</td>" 
+	Add-Content $fileName "</tr>" 
+} 
+
+# function to write the HTML Header to the file 
+function writetableHeader2
+{
+	param($fileName)
+	
+	Add-Content $freeSpaceFileName "<table width='95%' cellpadding='0' cellspacing='0'><tbody>"  
+	Add-Content $fileName "<tr>" 
+	Add-Content $fileName "<td width='20%' align='center' bgcolor=#CCCCCC>Service Name</td>" 
+	Add-Content $fileName "<td width='10%' align='center' bgcolor=#CCCCCC>Status</td>"  
+	Add-Content $fileName "</tr>" 
+}
+
+# Function to write the HTML footer to the file 
+Function writeHtmlFooter 
+{ 
+	param($fileName)
+	
+	Add-Content $fileName "</table>"
+	Add-Content $fileName "</br></br>"
+	Add-Content $fileName "<font face='Segoe UI' size='2'>Thanks,</font></br>" 
+	Add-Content $fileName "<font face='Segoe UI' size='2'>$signature</font>"
+	Add-Content $fileName "</body>" 
+	Add-Content $fileName "</html>" 
+} 
+
+# function to write the Disk space info to the file 
+function writeDiskInfo 
+{ 
+	param($fileName, $devId, $frSpace, $totSpace) 
+	
+	$totSpace		= [math]::Round(($totSpace/1073741824),2) 
+	$frSpace		= [Math]::Round(($frSpace/1073741824),2) 
+	$usedSpace 		= $totSpace - $frspace 
+	$expectedSpace 	= ($totSpace/10)
+	$usedSpace		= [Math]::Round($usedSpace,2) 
+	$freePercent 	= ($frspace/$totSpace)*100 
+	$freePercent 	= [Math]::Round($freePercent,0) 
+	
+	if ($frSpace -le $expectedSpace) 
+	{ 
+		Add-Content $fileName "<tr>" 
+		Add-Content $fileName "<td align='top'>$devid</td>" 
+		Add-Content $fileName "<td>$totSpace</td>" 
+		Add-Content $fileName "<td>$usedSpace</td>" 
+		Add-Content $fileName "<td>$frSpace</td>" 
+		Add-Content $fileName "<td bgcolor='#FF0000'>$freePercent</td>" 
+		Add-Content $fileName "</tr>" 
+	} 
+	else 
+	{ 
+		Add-Content $fileName "<tr>" 
+		Add-Content $fileName "<td>$devid</td>" 
+		Add-Content $fileName "<td>$totSpace</td>" 
+		Add-Content $fileName "<td>$usedSpace</td>" 
+		Add-Content $fileName "<td>$frSpace</td>" 
+		Add-Content $fileName "<td>$freePercent</td>" 
+		Add-Content $fileName "</tr>" 
+	} 
+} 
+
+# function to send notification e-mail using output file
+function sendEmail 
+{
+	param($from, $to, $subject, $smtphost)
+
+	$Time 				= Get-Date -Format g
+	$subject 			= "Server Usage Statistics at $Time" 
+	$body 				= Get-Content "$PSScriptRoot\FreeSpace.htm" | Out-String
+    
+	$DatabaseName   = "StarlightUsage"
+    $ServerName     = "ABIVMWEST65"
+    
+    #ConnectionString
+    $connectionString = “Server=$ServerName;Database=$DatabaseName;Integrated Security=SSPI;”
+    
+    #Create and Open SQLConnection
+    $conn=new-object System.Data.SqlClient.SQLConnection
+    $conn.ConnectionString=$ConnectionString
+    $conn.Open()
+    
+    $cmd = New-Object System.Data.SqlClient.SqlCommand
+    $cmd.Connection = $conn
+    $cmd.CommandType = [System.Data.CommandType]"StoredProcedure"
+    $cmd.CommandText = "ServiceUsageStatus"    
+    $cmd.Parameters.AddWithValue("@PowerShellBody", $body)
+    $cmd.ExecuteNonQuery()
+    
+    $conn.Close()
+}
+ 
+writeHtmlHeader $freeSpaceFileName 
+writeTableMainHeader $freeSpaceFileName
+$High_Usage 	= 0
+$SpaceIssue 	= 0
+$StatusIssue 	= 0
+
+function GetAllservices 
+{ 
+	param($ComputerName)
+	
+	$sess = New-PSSession -ComputerName $ComputerName
+ 
+	Invoke-Command -Session $sess -ScriptBlock {get-service}
+
+	Remove-PSSession -Session $sess
+}
+
+function CheckLike($str, $patterns){
+     foreach($pattern in $patterns) 
+        { 
+            if($str -like $pattern) 
+                { 
+                    return $true; 
+                } 
+        }
+        return $false;
+}
+
+#Loop through each server
+ForEach ($server in $serverList)
+{
+    if(Test-Connection -ComputerName $server.ServerName -Count 1 -ErrorAction SilentlyContinue)
+    {
+		$serverListArray1 = $server.ServerName
+        
+        $serverListArray2 	= $server.CNAME
+
+        # PRINT Sysname
+        Write-Output $serverListArray1
+    
+		$mem 									= Get-WmiObject win32_operatingsystem -ComputerName $serverListArray1| ForEach {"{0:N2}" -f ((($_.TotalVisibleMemorySize - $_.FreePhysicalMemory)*100)/ $_.TotalVisibleMemorySize)} 
+		$avg 									= Get-WmiObject win32_processor -computername $serverListArray1 | Measure-Object -property LoadPercentage -Average | ForEach {$_.Average} 
+		[int32]$mem_1							= $mem
+		[int32]$avg_1							= $avg
+		$StatusService 							= GetAllservices $serverListArray1|Where-Object {($_.ServiceName -like "*MSSQLSERVER*" -or $_.ServiceName -like  "*MSSQLServerOLAPService*" -or $_.Name -like 'MSOLAP$*' -or $_.Name -like 'HealthCheck*' -or $_.Name -like 'CubeAvailability*' -or $_.Name -like 'CubeTelemetryAgent*' )}
+		$StatusService
+		
+		#if (($mem_1 -gt $memoryCritical -or  $avg_1 -gt $cpuCritical )  -or ($StatusService.status  -eq "Stopped" )  )
+		#{
+			if ($StatusService.status  -eq "Stopped"  )
+			{
+				$StatusIssue = 1
+			}
+			else
+			{
+				$High_Usage = 1
+			}   
+			
+				Add-Content $freeSpaceFileName "<tr>" 
+				Add-Content $freeSpaceFileName "<td width='10%'><font face='Segoe UI' size='2'> $serverListArray2</font></td>" 
+				Add-Content $freeSpaceFileName "<td width='10%'><font face='Segoe UI' size='2'>$serverListArray1</font></td>" 
+		
+				if (($mem_1 -gt $memoryCritical -or $avg_1 -gt $cpuCritical) )
+				{
+					if ($mem_1 -gt $memoryCritical  )
+					{
+						Add-Content $freeSpaceFileName "<td width='12%' bgcolor='#FF0000'>$mem</td>" 
+						Add-Content $freeSpaceFileName "<td width='10%'>$avg</td>" 
+					}
+					elseif($avg_1 -gt $cpuCritical )
+					{
+						Add-Content $freeSpaceFileName "<td width='12%'>$mem</td>" 
+						Add-Content $freeSpaceFileName "<td width='10%' bgcolor='#FF0000'>$avg</td>"
+					}
+					else
+					{
+						Add-Content $freeSpaceFileName "<td width='12%'>$mem</td>" 
+						Add-Content $freeSpaceFileName "<td width='10%'>$avg</td>"
+					}
+				}
+			    else
+			    {
+					Add-Content $freeSpaceFileName "<td width='12%'>$mem</td>" 
+					Add-Content $freeSpaceFileName "<td width='10%'>$avg</td>"
+				}
+			
+			    Add-Content $freeSpaceFileName "<td width='35%'>"
+	 
+			    writeTableHeader $freeSpaceFileName 
+	 
+			    $dp = Get-WmiObject win32_logicaldisk -ComputerName $serverListArray1 |  Where-Object {$_.drivetype -eq 3} 
+			
+			    ForEach ($item in $dp) 
+			    { 
+				    Write-Host  $item.DeviceID  $item.VolumeName $item.FreeSpace $item.Size 
+				    writeDiskInfo $freeSpaceFileName $item.DeviceID $item.FreeSpace $item.Size 
+	  
+				    if ($item.FreeSpace -le ($item.Size/10))
+				    {
+					    $SpaceIssue = 1
+				    } 
+			    }
+
+			    Add-Content $freeSpaceFileName "</td>"
+			    Add-Content $freeSpaceFileName "</table>"
+			    Add-Content $freeSpaceFileName "<td width='55%'>"
+
+			    writeTableHeader2 $freeSpaceFileName
+
+		
+			    # function to check status of services on server
+			    function Get-KeyServices 
+			                                                                                                                                    {
+				param($ComputerName, $StatusService)
+
+                #print computername
+                Write-Output $ComputerName
+
+				ForEach($Service in $StatusService)#(GetAllservices $ComputerName)) 
+				{ 
+					function writeDiskInfo2 
+					{ 
+						param($fileName,$servicename,$servicestatus) 
+
+						if ($Service.status -eq "stopped")
+						{
+							Add-Content $fileName "<tr>" 
+							Add-Content $fileName "<td >$servicename</td>" 
+							Add-Content $fileName "<td bgcolor='#FF0000' color='#FFFFFF'>$servicestatus</td>" 
+							Add-Content $fileName "</tr>"
+						}
+						else
+						{
+							Add-Content $fileName "<tr>" 
+							Add-Content $fileName "<td >$servicename</td>" 
+							Add-Content $fileName "<td >$servicestatus</td>" 
+							Add-Content $fileName "</tr>"
+						}
+					}
+
+					$KeyServices = "ASLBService", "MSSQLSERVER", "MSSQLServerOLAPService",-join("MSOLAP","$","SHAREDPLATFORM"), -join("MSOLAP","*"), -join("HealthCheck","*"), -join("CubeTelemetryAgent","*");
+					
+
+                    if(Checklike $Service.Name $KeyServices)
+                    {
+                        writeDiskInfo2 $freeSpaceFileName $Service.DisplayName $Service.Status
+						write-Host "Test" $Service.Name $Service.DisplayName $Service.Status
+                    }
+				}
+			} 
+
+		    Get-KeyServices $serverListArray1 $StatusService
+
+		    Add-Content $freeSpaceFileName "</td>"
+		    Add-Content $freeSpaceFileName "</tr>"
+		    Add-Content $freeSpaceFileName "</table>"
+	    #}
+    }
+} 
+
+
+writeHtmlFooter $freeSpaceFileName 
+$date = ( get-date ).ToString('yyyy/MM/dd')
+
+if( $High_Usage -eq 1 -or $StatusIssue -eq 1)
+{
+    sendEmail $toEmail "Disk Space Report - $Date" hub1 
+}
