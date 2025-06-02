@@ -1,0 +1,57 @@
+cls
+$appId = '1e226f97-4bd7-4a64-a468-6bd71ca52e5e'
+$TenantId = '72f988bf-86f1-41af-91ab-2d7cd011db47'
+$appKey = 'mLXRC3WsHG6Pg9QTtnhP1wVWUOOCe4rXQuFnYVu4GSQ='
+
+$SecurePassword = ConvertTo-SecureString $appKey -AsPlainText -Force
+$Credentials = New-Object System.Management.Automation.PSCredential($appId, $SecurePassword) 
+$sts=Add-AzureRmAccount -ServicePrincipal -Credential $Credentials -Tenant $TenantId
+
+#Get ARM subscriptions
+$subs = Get-AzureRmSubscription 
+
+# Get VNET and their properties 
+$VNETObj = @()
+
+# Define Log file
+[String]$LogFile = "L:\FDnE Infra\Get VNET Details\VNET_" + (Get-Date -Format MM-dd-yyyy_hh-mm) + ".csv"
+
+#For each subscription, enumerate the ARM VMs, to get the relevant VM specific details
+foreach ($sub in $subs)
+{
+    Select-AzureRmSubscription -SubscriptionId $sub.SubscriptionId > $null
+    Write-Host " "
+    Write-Host 'Processing for subscription' $sub.Name -ForegroundColor Yellow
+
+    $VNETs = Get-AzureRmVirtualNetwork | Where-Object {$_.ResourceGroupName -notlike 'databricks-rg*'}
+    foreach ($VNET in $VNETs) {
+       
+        Write-Host 'Processing for VNET' $VNET.Name -ForegroundColor Green
+        
+        foreach( $Subnet  in ($VNET).Subnets)
+        {
+            $SubnetConfigured = $Subnet | Select-Object -ExpandProperty IpConfigurations
+
+            $Mask = $Subnet.AddressPrefix
+		    $Mask = $Mask.substring($Mask.Length - 2,2)
+            
+            switch ($Mask) {
+			    '29' { $AvailableAddresses = "3" }
+			    '28' { $AvailableAddresses = "11" }
+			    '27' { $AvailableAddresses = "27" }
+			    '26' { $AvailableAddresses = "59" }
+			    '25' { $AvailableAddresses = "123" }
+			    '24' { $AvailableAddresses = "251" }
+			    '23' { $AvailableAddresses = "507" }
+		    }
+
+
+            $VNETObj += @([pscustomobject]@{'Subscription Name'=$sub.Name;'VNET Name'=$VNET.Name;'VNET Resource'=($VNET).ResourceGroupName;'Subnet Name'=$Subnet.Name;'Location'=$VNET.Location;'IPv4'=($Subnet.AddressPrefix)-join '';'IPs Configured'=$SubnetConfigured.Count;'IPs  left'=($AvailableAddresses - $SubnetConfigured.Count)})
+        }
+        
+    } 
+}
+
+$VNETObj | Export-Csv $LogFile -Append -NoTypeInformation -Encoding ASCII -Force
+Write-Host " "
+Write-Host "Script execution is completed, check $LogFile for details"
