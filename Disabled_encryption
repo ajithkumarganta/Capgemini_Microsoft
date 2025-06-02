@@ -1,0 +1,13 @@
+#Provide the subscription Id of the subscription where managed disk exists
+$sourceSubscriptionId='Agile-BI-Azure-Subscription'
+
+#Provide the name of your resource group where managed disk exists
+$sourceResourceGroupName='ABIVMGateWay02'
+
+#Provide the name of the managed disk
+$managedDiskName='ABIVMGateWay02'
+
+#Set the context to the subscription Id where Managed Disk exists
+Select-AzSubscription -SubscriptionId $sourceSubscriptionId
+
+Disable-AzVMDiskEncryption -ResourceGroupName 'ABIVMGateWay02' -VMName 'ABIVMGateWay02'
