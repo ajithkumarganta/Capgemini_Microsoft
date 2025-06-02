@@ -1,0 +1,61 @@
+
+
+#clear screen
+cls
+
+# Folder containing source CSV files. 
+$folderPath = 'L:\FDnE Infra\Add User\Servers.txt'
+
+#location where reslt will save
+$OutputFile = "L:\FDnE Infra\Add User\Add_Users_" + (Get-Date -Format MM-dd-yyyy_hh-mm) + ".csv"
+
+#object to store server name and their status
+$ServerListArray = New-Object System.Collections.ArrayList
+
+$ServerList = get-content $folderPath
+
+$UserName = "FDEAMDIN"
+$GroupName = "Administrators"
+$DomainName = "REDMOND"
+$ErrorActionPreference = "Continue"
+#$ServerList
+foreach ($Server in $ServerList) {
+
+$Result = $null
+    $Server = $Server.trim()        
+    $Result = Test-NetConnection -ComputerName $Server -informationlevel quiet -WarningAction SilentlyContinue
+    $ServerObj = "" | Select ComputerName, Status
+        
+    $ServerObj.Computername = $Server
+    Write-host "Processing for $Server`t`t" -NoNewline -ForegroundColor White
+
+    if ($Result) {
+         Try{
+                $results = Invoke-Command -ComputerName $Server -ScriptBlock  {net localgroup Administrators REDMOND\fdeadmin /add} 
+                $ServerObj.Status = "User Added"
+                $results | select Host, Output, ExitCode | Format-List
+                Write-host "User Added" -ForegroundColor Green
+            }
+            Catch{
+             $ServerObj.Status = $_.Exception.innerexception
+             Write-host "$_.Exception.innerexception" -ForegroundColor Red
+            Continue
+        }
+    }
+
+     else {
+        $ServerObj.Status = "Server is Stopped/Deallocated"
+        Write-host "Server is Stopped/Deallocated" -ForegroundColor Red
+    }
+
+    $ServerListArray.Add($ServerObj) | Out-Null
+
+
+}
+
+$ServerListArray | Export-csv $OutputFile -NoTypeInformation
+
+    write-host " "
+    Write-host "Script Complete."
+    Write-host "Please refer to $OutputFile for results."
+    Write-host " "
