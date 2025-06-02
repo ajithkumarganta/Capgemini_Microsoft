@@ -1,0 +1,6 @@
+
+Import-Module PowerShellAccessControl
+
+Get-Service TCPHealthListener | Get-EffectiveAccess -Principal Redmond\Strlight
+
+Get-Service TCPHealthListener | Add-AccessControlEntry -ServiceAccessRights Start,Stop -Principal Redmond\Strlight
