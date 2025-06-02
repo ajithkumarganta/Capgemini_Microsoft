@@ -1,0 +1,27 @@
+# Add SQL Server snap-ins (if needed, uncomment if required)
+# Add-PSSnapin SqlServerCmdletSnapin100
+# Add-PSSnapin SqlServerProviderSnapin100
+ 
+# Define the paths for the query file and the output file
+$QueryPath = "G:\FDnE Infra\AzDBMail\DBMailSQLQuery.sql"
+$OutputFile = "G:\FDnE Infra\AzDBMail\DBMAil_starmail100624" + (Get-Date -Format MM-dd-yyyy_hh-mm) + ".txt"
+ 
+# Read the SQL query from the file
+$ExecuteQuery = Get-Content -Path $QueryPath | Out-String
+ 
+# Write initial results header to the output file
+"Results — > `r`n`r`n" > $OutputFile
+ 
+# Iterate through each server listed in the AllServers.txt file
+foreach ($server in Get-Content "G:\FDnE Infra\AzDBMail\AllServers.txt") {
+    $server 
+    "——————————-" >> $OutputFile
+    $server >> $OutputFile
+    "——————————-" >> $OutputFile
+ 
+    # Execute the query on the current server and append results to the output file
+    Invoke-Sqlcmd -ServerInstance $server -Query $ExecuteQuery -QueryTimeout 60000 -TrustServerCertificate |
+        Format-Table -AutoSize | Out-String -Width 4096 >> $OutputFile
+}
+ 
+Write-Output "Execution completed. Results saved to $OutputFile."
